@@ -4,6 +4,7 @@ import pytest
 from mock import patch, Mock
 from first import first
 import pipenv.utils
+import pythonfinder.utils
 
 
 # Pipfile format <-> requirements.txt format.
@@ -73,6 +74,8 @@ DEP_PIP_PAIRS = [
 @pytest.mark.utils
 @pytest.mark.parametrize("deps, expected", DEP_PIP_PAIRS)
 def test_convert_deps_to_pip(deps, expected):
+    if expected.startswith("Django"):
+        expected = expected.lower()
     assert pipenv.utils.convert_deps_to_pip(deps, r=False) == [expected]
 
 
@@ -115,7 +118,7 @@ def test_convert_deps_to_pip(deps, expected):
     ],
 )
 def test_convert_deps_to_pip_one_way(deps, expected):
-    assert pipenv.utils.convert_deps_to_pip(deps, r=False) == [expected]
+    assert pipenv.utils.convert_deps_to_pip(deps, r=False) == [expected.lower()]
 
 
 @pytest.mark.skipif(isinstance(u"", str), reason="don't need to test if unicode is str")
@@ -163,7 +166,8 @@ class TestUtils:
     )
     @pytest.mark.vcs
     def test_is_vcs(self, entry, expected):
-        assert pipenv.utils.is_vcs(entry) is expected
+        from pipenv.vendor.requirementslib.utils import is_vcs
+        assert is_vcs(entry) is expected
 
     @pytest.mark.utils
     def test_split_file(self):
@@ -212,13 +216,13 @@ class TestUtils:
             ),
         ],
     )
-    @patch("delegator.run")
+    # @patch(".vendor.pythonfinder.utils.get_python_version")
     def test_python_version_output_variants(
-        self, mocked_delegator, version_output, version
+        self, monkeypatch, version_output, version
     ):
-        run_ret = Mock()
-        run_ret.out = version_output
-        mocked_delegator.return_value = run_ret
+        def mock_version(path):
+            return version_output.split()[1]
+        monkeypatch.setattr("pipenv.vendor.pythonfinder.utils.get_python_version", mock_version)
         assert pipenv.utils.python_version("some/path") == version
 
     @pytest.mark.utils

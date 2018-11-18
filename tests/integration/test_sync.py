@@ -7,7 +7,7 @@ import pytest
 
 @pytest.mark.sync
 def test_sync_error_without_lockfile(PipenvInstance, pypi):
-    with PipenvInstance(pypi=pypi) as p:
+    with PipenvInstance(pypi=pypi, chdir=True) as p:
         with open(p.pipfile_path, 'w') as f:
             f.write("""
 [packages]
@@ -15,7 +15,7 @@ def test_sync_error_without_lockfile(PipenvInstance, pypi):
 
         c = p.pipenv('sync')
         assert c.return_code != 0
-        assert 'Pipfile.lock is missing!' in c.err
+        assert 'Pipfile.lock not found!' in c.err
 
 
 @pytest.mark.sync
@@ -40,7 +40,7 @@ six = "*"
 def test_sync_should_not_lock(PipenvInstance, pypi):
     """Sync should not touch the lock file, even if Pipfile is changed.
     """
-    with PipenvInstance(pypi=pypi) as p:
+    with PipenvInstance(pypi=pypi, chdir=True) as p:
         with open(p.pipfile_path, 'w') as f:
             f.write("""
 [packages]

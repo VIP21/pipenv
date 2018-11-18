@@ -135,7 +135,6 @@ Example Pipfile.lock
 
 Clone / create project repository::
 
-    …
     $ cd myproject
 
 Install from Pipfile, if there is one::
@@ -152,7 +151,8 @@ Next, activate the Pipenv shell::
 
     $ pipenv shell
     $ python --version
-    …
+
+This will spawn a new shell subprocess, which can be deactivated by using ``exit``.
 
 .. _initialization:
 
@@ -182,13 +182,38 @@ in your ``Pipfile.lock`` for now, run ``pipenv lock --keep-outdated``.  Make sur
 ☤ Specifying Versions of a Package
 ----------------------------------
 
-To tell pipenv to install a specific version of a library, the usage is simple::
+You can specify versions of a package using the `Semantic Versioning scheme <https://semver.org/>`_ 
+(i.e. ``major.minor.micro``). 
 
-    $ pipenv install requests==2.13.0
+For example, to install requests you can use: ::
+
+    $ pipenv install requests~=1.2   # equivalent to requests~=1.2.0 
+
+Pipenv will install version ``1.2`` and any minor update, but not ``2.0``.
 
 This will update your ``Pipfile`` to reflect this requirement, automatically.
 
-For other version specifiers, see `the relevant section of PEP-440`_.
+In general, Pipenv uses the same specifier format as pip. However, note that according to `PEP 440`_ , you can't use versions containing a hyphen or a plus sign.
+
+.. _`PEP 440`: <https://www.python.org/dev/peps/pep-0440/>
+
+To make inclusive or exclusive version comparisons you can use: ::
+
+    $ pipenv install "requests>=1.4"   # will install a version equal or larger than 1.4.0
+    $ pipenv install "requests<=2.13"  # will install a version equal or lower than 2.13.0
+    $ pipenv install "requests>2.19"   # will install 2.19.1 but not 2.19.0 
+
+.. note:: The use of ``" "`` around the package and version specification is highly recommended 
+    to avoid issues with `Input and output redirection <https://robots.thoughtbot.com/input-output-redirection-in-the-shell>`_
+    in Unix-based operating systems. 
+
+The use of ``~=`` is preferred over the ``==`` identifier as the former prevents pipenv from updating the packages:  ::
+
+    $ pipenv install "requests~=2.2"  # locks the major version of the package (this is equivalent to using ==2.*)
+
+To avoid installing a specific version you can use the ``!=`` identifier.
+
+For an in depth explanation of the valid identifiers and more complex use cases check `the relevant section of PEP-440`_.
 
 .. _`the relevant section of PEP-440`: https://www.python.org/dev/peps/pep-0440/#version-specifiers>
 
@@ -247,7 +272,7 @@ the current working directory when working on packages::
     "e1839a8" = {path = ".", editable = true}
     ...
 
-.. note:: All sub-dependencies will get added to the ``Pipfile.lock`` as well. Sub-dependencies are **not** added to the 
+.. note:: All sub-dependencies will get added to the ``Pipfile.lock`` as well. Sub-dependencies are **not** added to the
           ``Pipfile.lock`` if you leave the ``-e`` option out.
 
 
@@ -287,7 +312,7 @@ The user can provide these additional parameters:
               folder is encoded into a "slug value" and appended to ensure the virtualenv name
               is unique.
 
-    - ``--dev`` — Install both ``develop`` and ``default`` packages from ``Pipfile.lock``.
+    - ``--dev`` — Install both ``develop`` and ``default`` packages from ``Pipfile``.
     - ``--system`` — Use the system ``pip`` command rather than the one from your virtualenv.
     - ``--ignore-pipfile`` — Ignore the ``Pipfile`` and install from the ``Pipfile.lock``.
     - ``--skip-lock`` — Ignore the ``Pipfile.lock`` and install from the ``Pipfile``. In addition, do not write out a ``Pipfile.lock`` reflecting changes to the ``Pipfile``.
@@ -334,17 +359,30 @@ If you experience issues with ``$ pipenv shell``, just check the ``PIPENV_SHELL`
 ☤ A Note about VCS Dependencies
 -------------------------------
 
-Pipenv will resolve the sub–dependencies of VCS dependencies, but only if they are installed in editable mode::
+You can install packages with pipenv from git and other version control systems using URLs formatted according to the following rule::
 
-    $ pipenv install -e git+https://github.com/requests/requests.git#egg=requests
+    <vcs_type>+<scheme>://<location>/<user_or_organization>/<repository>@<branch_or_tag>#egg=<package_name>
+
+The only optional section is the ``@<branch_or_tag>`` section.  When using git over SSH, you may use the shorthand vcs and scheme alias ``git+git@<location>:<user_or_organization>/<repository>@<branch_or_tag>#<package_name>``. Note that this is translated to ``git+ssh://git@<location>`` when parsed.
+
+Note that it is **strongly recommended** that you install any version-controlled dependencies in editable mode, using ``pipenv install -e``, in order to ensure that dependency resolution can be performed with an up to date copy of the repository each time it is performed, and that it includes all known dependencies.
+
+Below is an example usage which installs the git repository located at ``https://github.com/requests/requests.git`` from tag ``v2.19.1`` as package name ``requests``::
+
+    $ pipenv install -e git+https://github.com/requests/requests.git@v2.19#egg=requests
+    Creating a Pipfile for this project...
+    Installing -e git+https://github.com/requests/requests.git@v2.19.1#egg=requests...
+    [...snipped...]
+    Adding -e git+https://github.com/requests/requests.git@v2.19.1#egg=requests to Pipfile's [packages]...
+    [...]
 
     $ cat Pipfile
     [packages]
-    requests = {git = "https://github.com/requests/requests.git", editable=true}
+    requests = {git = "https://github.com/requests/requests.git", editable = true, ref = "2.19.1"}
 
-If editable is not true, sub–dependencies will not be resolved.
+Valid values for ``<vcs_type>`` include ``git``, ``bzr``, ``svn``, and ``hg``.  Valid values for ``<scheme>`` include ``http``, ``https``, ``ssh``, and ``file``.  In specific cases you also have access to other schemes: ``svn`` may be combined with ``svn`` as a scheme, and ``bzr`` can be combined with ``sftp`` and ``lp``.
 
-For more information about other options available when specifying VCS dependencies, please check the `Pipfile spec <https://github.com/pypa/pipfile>`__.
+You can read more about pip's implementation of VCS support `here <https://pip.pypa.io/en/stable/reference/pip_install/#vcs-support>`_. For more information about other options available when specifying VCS dependencies, please check the `Pipfile spec <https://github.com/pypa/pipfile>`_.
 
 
 ☤ Pipfile.lock Security Features

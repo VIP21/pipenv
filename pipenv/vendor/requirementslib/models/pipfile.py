@@ -1,189 +1,214 @@
 # -*- coding: utf-8 -*-
+
+from __future__ import absolute_import, unicode_literals, print_function
+
 import attr
-import contoml
+import copy
 import os
-import toml
-from .._vendor import pipfile
+
+import tomlkit
+
+from vistir.compat import Path, FileNotFoundError
+
 from .requirements import Requirement
-from .utils import optional_instance_of, filter_none
-from .._compat import Path, FileNotFoundError
+from .project import ProjectFile
+from .utils import optional_instance_of
 from ..exceptions import RequirementError
+from ..utils import is_vcs, is_editable, merge_items
+import plette.pipfiles
 
 
-@attr.s
-class Source(object):
-    #: URL to PyPI instance
-    url = attr.ib(default="pypi")
-    #: If False, skip SSL checks
-    verify_ssl = attr.ib(default=True, validator=optional_instance_of(bool))
-    #: human name to refer to this source (can be referenced in packages or dev-packages)
-    name = attr.ib(default="")
-
-    def get_dict(self):
-        return attr.asdict(self)
-
-    @property
-    def expanded(self):
-        source_dict = attr.asdict(self).copy()
-        source_dict["url"] = os.path.expandvars(source_dict.get("url"))
-        return source_dict
+is_pipfile = optional_instance_of(plette.pipfiles.Pipfile)
+is_path = optional_instance_of(Path)
+is_projectfile = optional_instance_of(ProjectFile)
 
 
-@attr.s
-class Section(object):
-    ALLOWED_NAMES = ("packages", "dev-packages")
-    #: Name of the pipfile section
-    name = attr.ib(default="packages")
-    #: A list of requirements that are contained by the section
-    requirements = attr.ib(default=list)
+class PipfileLoader(plette.pipfiles.Pipfile):
+    @classmethod
+    def validate(cls, data):
+        for key, klass in plette.pipfiles.PIPFILE_SECTIONS.items():
+            if key not in data or key == "source":
+                continue
+            klass.validate(data[key])
 
-    def get_dict(self):
-        _dict = {}
-        for req in self.requirements:
-            _dict.update(req.as_pipfile())
-        return {self.name: _dict}
-
-    @property
-    def vcs_requirements(self):
-        return [req for req in self.requirements if req.is_vcs]
-
-    @property
-    def editable_requirements(self):
-        return [req for req in self.requirements if req.editable]
-
-
-@attr.s
-class RequiresSection(object):
-    python_version = attr.ib(default=None)
-    python_full_version = attr.ib(default=None)
-
-    def get_dict(self):
-        requires = attr.asdict(self, filter=filter_none)
-        if not requires:
-            return {}
-        return {"requires": requires}
+    @classmethod
+    def load(cls, f, encoding=None):
+        content = f.read()
+        if encoding is not None:
+            content = content.decode(encoding)
+        _data = tomlkit.loads(content)
+        if "source" not in _data:
+            # HACK: There is no good way to prepend a section to an existing
+            # TOML document, but there's no good way to copy non-structural
+            # content from one TOML document to another either. Modify the
+            # TOML content directly, and load the new in-memory document.
+            sep = "" if content.startswith("\n") else "\n"
+            content = plette.pipfiles.DEFAULT_SOURCE_TOML + sep + content
+        data = tomlkit.loads(content)
+        return cls(data)
 
 
-@attr.s
-class PipenvSection(object):
-    allow_prereleases = attr.ib(default=False)
-
-    def get_dict(self):
-        if self.allow_prereleases:
-            return {"pipenv": attr.asdict(self)}
-        return {}
-
-
-@attr.s
+@attr.s(slots=True)
 class Pipfile(object):
-    #: Path to the pipfile
-    path = attr.ib(default=None, converter=Path, validator=optional_instance_of(Path))
-    #: Sources listed in the pipfile
-    sources = attr.ib(default=attr.Factory(list))
-    #: Sections contained by the pipfile
-    sections = attr.ib(default=attr.Factory(list))
-    #: Scripts found in the pipfile
-    scripts = attr.ib(default=attr.Factory(dict))
-    #: This section stores information about what python version is required
-    requires = attr.ib(default=attr.Factory(RequiresSection))
-    #: This section stores information about pipenv such as prerelease requirements
-    pipenv = attr.ib(default=attr.Factory(PipenvSection))
-    #: This is the sha256 hash of the pipfile (without environment interpolation)
-    pipfile_hash = attr.ib()
+    path = attr.ib(validator=is_path, type=Path)
+    projectfile = attr.ib(validator=is_projectfile, type=ProjectFile)
+    _pipfile = attr.ib(type=plette.pipfiles.Pipfile)
+    requirements = attr.ib(default=attr.Factory(list), type=list)
+    dev_requirements = attr.ib(default=attr.Factory(list), type=list)
 
-    @pipfile_hash.default
-    def get_hash(self):
-        p = pipfile.load(self.path.as_posix(), inject_env=False)
-        return p.hash
+    @path.default
+    def _get_path(self):
+        return Path(os.curdir).absolute()
+
+    @projectfile.default
+    def _get_projectfile(self):
+        return self.load_projectfile(os.curdir, create=False)
+
+    @_pipfile.default
+    def _get_pipfile(self):
+        return self.projectfile.model
+
+    @property
+    def pipfile(self):
+        return self._pipfile
+
+    def get_deps(self, dev=False, only=True):
+        deps = {}
+        if dev:
+            deps.update(self.pipfile._data["dev-packages"])
+            if only:
+                return deps
+        return merge_items([deps, self.pipfile._data["packages"]])
+
+    def get(self, k):
+        return self.__getitem__(k)
+
+    def __contains__(self, k):
+        check_pipfile = k in self.extended_keys or self.pipfile.__contains__(k)
+        if check_pipfile:
+            return True
+        return super(Pipfile, self).__contains__(k)
+
+    def __getitem__(self, k, *args, **kwargs):
+        retval = None
+        pipfile = self._pipfile
+        section = None
+        pkg_type = None
+        try:
+            retval = pipfile[k]
+        except KeyError:
+            if "-" in k:
+                section, _, pkg_type = k.rpartition("-")
+                vals = getattr(pipfile.get(section, {}), "_data", {})
+                if pkg_type == "vcs":
+                    retval = {k: v for k, v in vals.items() if is_vcs(v)}
+                elif pkg_type == "editable":
+                    retval = {k: v for k, v in vals.items() if is_editable(v)}
+            if retval is None:
+                raise
+        else:
+            retval = getattr(retval, "_data", retval)
+        return retval
+
+    def __getattr__(self, k, *args, **kwargs):
+        retval = None
+        pipfile = super(Pipfile, self).__getattribute__("_pipfile")
+        try:
+            retval = super(Pipfile, self).__getattribute__(k)
+        except AttributeError:
+            retval = getattr(pipfile, k, None)
+        if retval is not None:
+            return retval
+        return super(Pipfile, self).__getattribute__(k, *args, **kwargs)
 
     @property
     def requires_python(self):
-        return self.requires.requires_python
+        return self._pipfile.requires.requires_python
 
     @property
     def allow_prereleases(self):
-        return self.pipenv.allow_prereleases
-
-    def get_sources(self):
-        """Return a dictionary with a list of dictionaries of pipfile sources"""
-        _dict = {}
-        for src in self.sources:
-            _dict.update(src.get_dict())
-        return {"source": _dict} if _dict else {}
-
-    def get_sections(self):
-        """Return a dictionary with both pipfile sections and requirements"""
-        _dict = {}
-        for section in self.sections:
-            _dict.update(section.get_dict())
-        return _dict
-
-    def get_pipenv(self):
-        pipenv_dict = self.pipenv.get_dict()
-        if pipenv_dict:
-            return pipenv_dict
-
-    def get_requires(self):
-        req_dict = self.requires.get_dict()
-        return req_dict if req_dict else {}
-
-    def get_dict(self):
-        _dict = attr.asdict(self, recurse=False)
-        for k in ["path", "pipfile_hash", "sources", "sections", "requires", "pipenv"]:
-            if k in _dict:
-                _dict.pop(k)
-        return _dict
-
-    def dump(self, to_dict=False):
-        """Dumps the pipfile to a toml string
-        """
-
-        _dict = self.get_sources()
-        _dict.update(self.get_sections())
-        _dict.update(self.get_dict())
-        _dict.update(self.get_pipenv())
-        _dict.update(self.get_requires())
-        if to_dict:
-            return _dict
-        return contoml.dumps(_dict)
+        return self._pipfile.get("pipenv", {}).get("allow_prereleases", False)
 
     @classmethod
-    def load(cls, path):
+    def read_projectfile(cls, path):
+        """Read the specified project file and provide an interface for writing/updating.
+
+        :param str path: Path to the target file.
+        :return: A project file with the model and location for interaction
+        :rtype: :class:`~requirementslib.models.project.ProjectFile`
+        """
+        pf = ProjectFile.read(
+            path,
+            PipfileLoader,
+            invalid_ok=True
+        )
+        return pf
+
+    @classmethod
+    def load_projectfile(cls, path, create=False):
+        """Given a path, load or create the necessary pipfile.
+
+        :param str path: Path to the project root or pipfile
+        :param bool create: Whether to create the pipfile if not found, defaults to True
+        :raises OSError: Thrown if the project root directory doesn't exist
+        :raises FileNotFoundError: Thrown if the pipfile doesn't exist and ``create=False``
+        :return: A project file instance for the supplied project
+        :rtype: :class:`~requirementslib.models.project.ProjectFile`
+        """
+        if not path:
+            raise RuntimeError("Must pass a path to classmethod 'Pipfile.load'")
         if not isinstance(path, Path):
-            path = Path(path)
-        pipfile_path = path / "Pipfile"
-        if not path.exists():
+            path = Path(path).absolute()
+        pipfile_path = path if path.name == "Pipfile" else path.joinpath("Pipfile")
+        project_path = pipfile_path.parent
+        if not project_path.exists():
             raise FileNotFoundError("%s is not a valid project path!" % path)
         elif not pipfile_path.exists() or not pipfile_path.is_file():
-            raise RequirementError("%s is not a valid Pipfile" % pipfile_path)
-        pipfile_dict = toml.load(pipfile_path.as_posix())
-        sections = [cls.get_section(pipfile_dict, s) for s in Section.ALLOWED_NAMES]
-        pipenv = pipfile_dict.get("pipenv", {})
-        requires = pipfile_dict.get("requires", {})
-        creation_dict = {
-            "path": pipfile_path,
-            "sources": [Source(**src) for src in pipfile_dict.get("source", [])],
-            "sections": sections,
-            "scripts": pipfile_dict.get("scripts"),
-        }
-        if requires:
-            creation_dict["requires"] = RequiresSection(**requires)
-        if pipenv:
-            creation_dict["pipenv"] = PipenvSection(**pipenv)
-        return cls(**creation_dict)
+            if not create:
+                raise RequirementError("%s is not a valid Pipfile" % pipfile_path)
+        return cls.read_projectfile(pipfile_path.as_posix())
 
-    @staticmethod
-    def get_section(pf_dict, section):
-        """Get section objects from a pipfile dictionary
+    @classmethod
+    def load(cls, path, create=False):
+        """Given a path, load or create the necessary pipfile.
 
-        :param pf_dict: A toml loaded pipfile dictionary
-        :type pf_dict: dict
-        :returns: Section objects
+        :param str path: Path to the project root or pipfile
+        :param bool create: Whether to create the pipfile if not found, defaults to True
+        :raises OSError: Thrown if the project root directory doesn't exist
+        :raises FileNotFoundError: Thrown if the pipfile doesn't exist and ``create=False``
+        :return: A pipfile instance pointing at the supplied project
+        :rtype:: class:`~requirementslib.models.pipfile.Pipfile`
         """
-        sect = pf_dict.get(section)
-        requirements = []
-        if section not in Section.ALLOWED_NAMES:
-            raise ValueError("Not a valid pipfile section name: %s" % section)
-        for name, pf_entry in sect.items():
-            requirements.append(Requirement.from_pipfile(name, pf_entry))
-        return Section(name=section, requirements=requirements)
+
+        projectfile = cls.load_projectfile(path, create=create)
+        pipfile = projectfile.model
+        dev_requirements = [
+            Requirement.from_pipfile(k, getattr(v, "_data", v)) for k, v in pipfile.get("dev-packages", {}).items()
+        ]
+        requirements = [
+            Requirement.from_pipfile(k, getattr(v, "_data", v)) for k, v in pipfile.get("packages", {}).items()
+        ]
+        creation_args = {
+            "projectfile": projectfile,
+            "pipfile": pipfile,
+            "dev_requirements": dev_requirements,
+            "requirements": requirements,
+            "path": Path(projectfile.location)
+        }
+        return cls(**creation_args)
+
+    def write(self):
+        self.projectfile.model = copy.deepcopy(self._pipfile)
+        self.projectfile.write()
+
+    @property
+    def dev_packages(self, as_requirements=True):
+        if as_requirements:
+            return self.dev_requirements
+        return self._pipfile.get('dev-packages', {})
+
+    @property
+    def packages(self, as_requirements=True):
+        if as_requirements:
+            return self.requirements
+        return self._pipfile.get('packages', {})

@@ -13,15 +13,10 @@ from flaky import flaky
 @pytest.mark.extras
 @pytest.mark.install
 @pytest.mark.local
-@pytest.mark.parametrize(
-    "line, pipfile",
-    [["-e .[dev]", {"testpipenv": {"path": ".", "editable": True, "extras": ["dev"]}}]],
-)
-def test_local_extras_install(PipenvInstance, pypi, line, pipfile):
+def test_local_extras_install(PipenvInstance, pypi):
     """Ensure -e .[extras] installs.
     """
     with PipenvInstance(pypi=pypi, chdir=True) as p:
-        project = Project()
         setup_py = os.path.join(p.path, "setup.py")
         with open(setup_py, "w") as fh:
             contents = """
@@ -40,7 +35,17 @@ zip_safe=False
 )
             """.strip()
             fh.write(contents)
-        project.write_toml({"packages": pipfile, "dev-packages": {}})
+        line = "-e .[dev]"
+        # pipfile = {"testpipenv": {"path": ".", "editable": True, "extras": ["dev"]}}
+        project = Project()
+        with open(os.path.join(p.path, 'Pipfile'), 'w') as fh:
+            fh.write("""
+[packages]
+testpipenv = {path = ".", editable = true, extras = ["dev"]}
+
+[dev-packages]
+            """.strip())
+        # project.write_toml({"packages": pipfile, "dev-packages": {}})
         c = p.pipenv("install")
         assert c.return_code == 0
         assert "testpipenv" in p.lockfile["default"]
@@ -210,9 +215,10 @@ Requests = "==2.14.0"   # Inline comment
         c = p.pipenv("install python_DateUtil")
         assert c.return_code == 0
         assert "python-dateutil" in p.pipfile["packages"]
-        contents = open(p.pipfile_path).read()
-        assert "# Pre comment" in contents
-        assert "# Inline comment" in contents
+        with open(p.pipfile_path) as f:
+            contents = f.read()
+            assert "# Pre comment" in contents
+            assert "# Inline comment" in contents
 
 
 @pytest.mark.files
